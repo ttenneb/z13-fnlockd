@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Software Fn-lock daemon for the ASUS ROG Flow Z13 GZ302 keyboard cover.
+
+The GZ302 keyboard exposes keyboard, consumer-key, mouse, and touchpad HID
+interfaces. Generic remappers can accidentally grab the pointer interfaces. This
+service deliberately opens only the two keyboard event nodes and republishes
+keyboard events through uinput.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import pwd
+import signal
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from evdev import InputDevice, UInput, ecodes, events
+
+DEFAULT_CONSUMER_DEVICE = Path(
+    "/dev/input/by-id/usb-ASUSTeK_Computer_Inc._GZ302EA-Keyboard-event-if00"
+)
+DEFAULT_KEYBOARD_DEVICE = Path(
+    "/dev/input/by-id/usb-ASUSTeK_Computer_Inc._GZ302EA-Keyboard-if02-event-kbd"
+)
+DEFAULT_STATE_FILE = Path("/run/z13-fnlockd/state")
+
+LOG = logging.getLogger("z13-fnlockd")
+
+# Plain F-row -> Fn/hotkey behavior while software Fn-lock is ON.
+LOCKED_FROW = {
+    ecodes.KEY_F1: ecodes.KEY_MUTE,
+    ecodes.KEY_F2: ecodes.KEY_VOLUMEDOWN,
+    ecodes.KEY_F3: ecodes.KEY_VOLUMEUP,
+    ecodes.KEY_F4: ecodes.KEY_MICMUTE,
+    ecodes.KEY_F7: ecodes.KEY_BRIGHTNESSDOWN,
+    ecodes.KEY_F8: ecodes.KEY_BRIGHTNESSUP,
+    ecodes.KEY_F10: ecodes.KEY_F21,
+}
+
+# Physical Fn alternate events -> normal F-row while software Fn-lock is ON.
+LOCKED_INVERSE = {
+    ecodes.KEY_MUTE: ecodes.KEY_F1,
+    ecodes.KEY_VOLUMEDOWN: ecodes.KEY_F2,
+    ecodes.KEY_VOLUMEUP: ecodes.KEY_F3,
+    ecodes.KEY_MICMUTE: ecodes.KEY_F4,
+    ecodes.KEY_BRIGHTNESSDOWN: ecodes.KEY_F7,
+    ecodes.KEY_BRIGHTNESSUP: ecodes.KEY_F8,
+    ecodes.KEY_F21: ecodes.KEY_F10,
+}
+
+# The virtual keyboard needs to advertise the keys we may emit. Keep this broad
+# but keyboard-only; do not advertise pointer axes/buttons.
+ALL_KEYS = set(range(1, 249)) | {ecodes.KEY_FN_ESC}
+UI_CAPS = {ecodes.EV_KEY: sorted(ALL_KEYS)}
+
+
+@dataclass(frozen=True)
+class Config:
+    consumer_device: Path
+    keyboard_device: Path
+    state_file: Path
+    notify: bool
+
+
+class FnLockDaemon:
+    def __init__(self, config: Config):
+        self.config = config
+        self.locked = False
+        self.ui: UInput | None = None
+
+    def write_state(self) -> None:
+        try:
+            self.config.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config.state_file.write_text("locked\n" if self.locked else "unlocked\n")
+        except OSError:
+            LOG.exception("failed to write state file %s", self.config.state_file)
+
+    @staticmethod
+    def active_desktop_user() -> tuple[str, int] | tuple[None, None]:
+        """Find an active local session with a freedesktop notification bus."""
+        try:
+            sessions = subprocess.check_output(
+                ["/usr/bin/loginctl", "list-sessions", "--no-legend"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            for line in sessions.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                session_id = parts[0]
+                props = subprocess.check_output(
+                    [
+                        "/usr/bin/loginctl",
+                        "show-session",
+                        session_id,
+                        "-p",
+                        "Active",
+                        "-p",
+                        "Class",
+                        "-p",
+                        "Type",
+                        "-p",
+                        "User",
+                        "--value",
+                    ],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                ).splitlines()
+                if len(props) < 4:
+                    continue
+                active, session_class, session_type, uid_text = props[:4]
+                if active != "yes" or session_class != "user":
+                    continue
+                if session_type not in {"wayland", "x11", "tty"}:
+                    continue
+                uid = int(uid_text)
+                if Path(f"/run/user/{uid}/bus").exists():
+                    return pwd.getpwuid(uid).pw_name, uid
+        except Exception:
+            pass
+
+        # Fallback for single-user graphical sessions.
+        for bus in sorted(Path("/run/user").glob("*/bus")):
+            try:
+                uid = int(bus.parent.name)
+                if uid >= 1000:
+                    return pwd.getpwuid(uid).pw_name, uid
+            except Exception:
+                continue
+        return None, None
+
+    def notify_state(self) -> None:
+        if not self.config.notify:
+            return
+        user, uid = self.active_desktop_user()
+        if not user:
+            LOG.debug("no active notification session found")
+            return
+
+        state = "ON" if self.locked else "OFF"
+        body = "Function-row hotkeys enabled" if self.locked else "Normal F1–F12 keys enabled"
+        cmd = [
+            "/usr/bin/runuser",
+            "-u",
+            user,
+            "--",
+            "env",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            "/usr/bin/notify-send",
+            "--app-name=Z13 Fn Lock",
+            "--expire-time=1200",
+            "--icon=input-keyboard",
+            f"Fn Lock {state}",
+            body,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode:
+                LOG.warning("notify-send failed rc=%s stderr=%s", result.returncode, result.stderr.strip())
+        except Exception:
+            LOG.exception("failed to send notification")
+
+    def emit_key(self, code: int, value: int) -> None:
+        assert self.ui is not None
+        self.ui.write(ecodes.EV_KEY, code, value)
+        self.ui.syn()
+
+    def tap_combo(self, *codes: int) -> None:
+        assert self.ui is not None
+        for code in codes:
+            self.ui.write(ecodes.EV_KEY, code, 1)
+        self.ui.syn()
+        for code in reversed(codes):
+            self.ui.write(ecodes.EV_KEY, code, 0)
+        self.ui.syn()
+
+    @staticmethod
+    def run_command(command: list[str]) -> None:
+        try:
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            LOG.exception("failed to run command: %r", command)
+
+    def toggle(self) -> None:
+        self.locked = not self.locked
+        self.write_state()
+        self.notify_state()
+        LOG.info("Fn-lock %s", "ON" if self.locked else "OFF")
+
+    def handle_key(self, device_label: str, event: events.InputEvent) -> None:
+        code = event.code
+        value = event.value
+
+        # Toggle on press only; ignore repeat/release. Consume KEY_FN_ESC so the
+        # desktop never sees an unsupported/vendor key.
+        if code == ecodes.KEY_FN_ESC:
+            if value == 1:
+                self.toggle()
+            return
+
+        if self.locked:
+            if device_label == "keyboard" and code == ecodes.KEY_F5:
+                if value == 1:
+                    self.run_command(["/usr/bin/asusctl", "profile", "next"])
+                return
+
+            if device_label == "keyboard" and code == ecodes.KEY_F6:
+                if value == 1:
+                    self.tap_combo(ecodes.KEY_LEFTMETA, ecodes.KEY_LEFTSHIFT, ecodes.KEY_S)
+                return
+
+            if device_label == "keyboard" and code == ecodes.KEY_F9:
+                if value == 1:
+                    self.tap_combo(ecodes.KEY_LEFTMETA, ecodes.KEY_P)
+                return
+
+            if device_label == "keyboard" and code in LOCKED_FROW:
+                self.emit_key(LOCKED_FROW[code], value)
+                return
+
+            if device_label == "consumer" and code in LOCKED_INVERSE:
+                self.emit_key(LOCKED_INVERSE[code], value)
+                return
+
+        self.emit_key(code, value)
+
+    async def wait_for_device(self, path: Path) -> InputDevice:
+        while not path.exists():
+            LOG.warning("waiting for %s", path)
+            await asyncio.sleep(1)
+        return InputDevice(str(path))
+
+    async def pump(self, device: InputDevice, label: str) -> None:
+        LOG.info("grabbing %s: %s (%s)", label, device.name, device.path)
+        device.grab()
+        try:
+            async for event in device.async_read_loop():
+                if event.type == ecodes.EV_KEY:
+                    self.handle_key(label, event)
+                elif event.type in (ecodes.EV_MSC, ecodes.EV_SYN):
+                    continue
+                else:
+                    # These devices should not produce pointer events. If they
+                    # do, forward rather than reinterpret them.
+                    assert self.ui is not None
+                    self.ui.write_event(event)
+                    self.ui.syn()
+        finally:
+            try:
+                device.ungrab()
+            except OSError:
+                pass
+
+    async def run(self) -> None:
+        consumer = await self.wait_for_device(self.config.consumer_device)
+        keyboard = await self.wait_for_device(self.config.keyboard_device)
+
+        self.ui = UInput(UI_CAPS, name="z13-fnlockd virtual keyboard", version=1)
+        self.write_state()
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+
+        tasks = [
+            asyncio.create_task(self.pump(consumer, "consumer")),
+            asyncio.create_task(self.pump(keyboard, "keyboard")),
+        ]
+        await stop.wait()
+        LOG.info("stopping")
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.ui.close()
+
+
+def parse_args() -> Config:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--consumer-device", type=Path, default=DEFAULT_CONSUMER_DEVICE)
+    parser.add_argument("--keyboard-device", type=Path, default=DEFAULT_KEYBOARD_DEVICE)
+    parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
+    parser.add_argument("--no-notify", action="store_true", help="disable desktop notifications")
+    args = parser.parse_args()
+    return Config(
+        consumer_device=args.consumer_device,
+        keyboard_device=args.keyboard_device,
+        state_file=args.state_file,
+        notify=not args.no_notify,
+    )
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    asyncio.run(FnLockDaemon(parse_args()).run())
+
+
+if __name__ == "__main__":
+    main()

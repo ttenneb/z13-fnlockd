@@ -1,0 +1,18 @@
+[Unit]
+Description=ASUS ROG Flow Z13 software Fn-lock daemon
+Documentation=file:/usr/local/share/doc/z13-fnlockd/README.md
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/z13-fnlockd
+Restart=on-failure
+RestartSec=1
+RuntimeDirectory=z13-fnlockd
+RuntimeDirectoryMode=0755
+
+# Root is used because the daemon grabs /dev/input event devices and creates a
+# /dev/uinput virtual keyboard. The code only opens the two keyboard interfaces.
+
+[Install]
+WantedBy=multi-user.target
