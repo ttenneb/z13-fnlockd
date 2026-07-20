@@ -58,8 +58,8 @@ The RPM intentionally does not enable the service automatically. Start it with
 ```bash
 sudo dnf install rpm-build rpmdevtools systemd-rpm-macros python3-evdev libnotify
 rpmdev-setuptree
-git archive --format=tar.gz --prefix=z13-fnlockd-0.1.0/ \
-  -o ~/rpmbuild/SOURCES/z13-fnlockd-0.1.0.tar.gz v0.1.0
+git archive --format=tar.gz --prefix=z13-fnlockd-0.1.1/ \
+  -o ~/rpmbuild/SOURCES/z13-fnlockd-0.1.1.tar.gz v0.1.1
 rpmbuild -ba z13-fnlockd.spec
 ```
 

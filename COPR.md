@@ -28,7 +28,7 @@ After tagging a release, build from the spec in this repo:
 ```bash
 copr-cli buildscm z13-fnlockd \
   --clone-url https://github.com/ttenneb/z13-fnlockd.git \
-  --commit v0.1.0 \
+  --commit v0.1.1 \
   --spec z13-fnlockd.spec \
   --type git
 ```

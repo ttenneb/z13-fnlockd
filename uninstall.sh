@@ -8,7 +8,9 @@ fi
 
 systemctl disable --now z13-fnlockd 2>/dev/null || true
 rm -f /etc/systemd/system/z13-fnlockd.service
+rm -f /usr/libexec/z13-fnlockd
 rm -f /usr/local/libexec/z13-fnlockd
+rm -rf /usr/share/doc/z13-fnlockd
 rm -rf /usr/local/share/doc/z13-fnlockd
 rm -rf /run/z13-fnlockd
 systemctl daemon-reload

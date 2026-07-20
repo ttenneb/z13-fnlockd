@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT=${1:-z13-fnlockd}
-VERSION=${2:-v0.1.0}
+VERSION=${2:-v0.1.1}
 
 if ! command -v copr-cli >/dev/null; then
   echo "copr-cli is required: sudo dnf install copr-cli" >&2

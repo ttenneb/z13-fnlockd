@@ -1,5 +1,5 @@
 Name:           z13-fnlockd
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Software Fn-lock daemon for ASUS ROG Flow Z13 GZ302
 
@@ -54,5 +54,8 @@ install -D -m 0644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
 %{_unitdir}/z13-fnlockd.service
 
 %changelog
+* Mon Jul 20 2026 Bennett Garcia <bennett.garcia@rutgers.edu> - 0.1.1-1
+- Fix packaged systemd unit paths
+
 * Mon Jul 20 2026 Bennett Garcia <bennett.garcia@rutgers.edu> - 0.1.0-1
 - Initial RPM package
