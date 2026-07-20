@@ -34,11 +34,36 @@ When software Fn-lock is ON:
 For simple keys, the physical `Fn+F*` event is inverted back to the normal F-key
 while software Fn-lock is ON.
 
-## Install
+## Install from source
 
 ```bash
 sudo ./install.sh
 ```
+
+## Install from RPM/COPR
+
+Once COPR is published:
+
+```bash
+sudo dnf copr enable ttenneb/z13-fnlockd
+sudo dnf install z13-fnlockd
+sudo systemctl enable --now z13-fnlockd
+```
+
+The RPM intentionally does not enable the service automatically. Start it with
+`systemctl enable --now` after installation.
+
+## Build RPM locally
+
+```bash
+sudo dnf install rpm-build rpmdevtools systemd-rpm-macros python3-evdev libnotify
+rpmdev-setuptree
+git archive --format=tar.gz --prefix=z13-fnlockd-0.1.0/ \
+  -o ~/rpmbuild/SOURCES/z13-fnlockd-0.1.0.tar.gz v0.1.0
+rpmbuild -ba z13-fnlockd.spec
+```
+
+The binary RPM will be under `~/rpmbuild/RPMS/noarch/`.
 
 ## Use
 
@@ -57,8 +82,20 @@ Temporarily stop:
 sudo systemctl stop z13-fnlockd
 ```
 
-Permanently uninstall:
+Permanently uninstall source install:
 
 ```bash
 sudo ./uninstall.sh
 ```
+
+Permanently uninstall RPM install:
+
+```bash
+sudo dnf remove z13-fnlockd
+```
+
+## Related Z13/Linux tools
+
+- [`z13ctl`](https://github.com/dahui/z13ctl) / [`z13gui`](https://github.com/dahui/z13gui): lighting, battery limit, fan curves, profiles, TDP, undervolting, and Z13 hardware control.
+- [`asusctl`](https://gitlab.com/asus-linux/asusctl): ASUS Linux control stack. On Fedora it is commonly installed from the `lukenukem/asus-linux` COPR.
+- [`strix-halo-linux-setup`](https://github.com/th3cavalry/GZ302-Linux-Setup): broader Strix Halo/GZ302 setup and hardware workaround scripts.
